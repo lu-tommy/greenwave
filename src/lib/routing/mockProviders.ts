@@ -11,8 +11,8 @@ import type {
 
 /**
  * Deterministic, network-free fixtures for tests (and for exercising the
- * full destination -> route -> discovery -> corridor pipeline without a
- * Mapbox token or live Overpass access). Never used in production code
+ * full destination -> route -> discovery -> corridor pipeline without
+ * live OSRM/Nominatim/Overpass access). Never used in production code
  * paths — only by tests and dev tooling.
  */
 

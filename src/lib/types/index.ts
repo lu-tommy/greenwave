@@ -301,12 +301,13 @@ export type RouteProgress = {
 
 /**
  * Routing is intentionally decoupled from React and from any specific
- * provider. MapboxRoutingProvider is the only real implementation (via a
- * server-side proxy, see src/app/api/routing/*); tests use a mock.
+ * provider. OsrmRoutingProvider is the only real implementation (via a
+ * server-side proxy, see src/app/api/routing/*) — open-source OSRM +
+ * Nominatim, no API key; tests use a mock.
  */
 export interface RoutingProvider {
   searchDestination(query: string, proximity?: LatLng): Promise<DestinationCandidate[]>;
-  getRoute(origin: LatLng, destination: LatLng, options?: { profile?: "driving" | "driving-traffic" }): Promise<Route>;
+  getRoute(origin: LatLng, destination: LatLng): Promise<Route>;
 }
 
 // ---------------------------------------------------------------------------

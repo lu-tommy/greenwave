@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MapboxRoutingProvider, RoutingUnavailableError } from "@/lib/routing/MapboxRoutingProvider";
+import { OsrmRoutingProvider, RoutingUnavailableError } from "@/lib/routing/OsrmRoutingProvider";
 import { OsmTrafficSignalDiscoveryProvider, SignalDiscoveryUnavailableError } from "@/lib/signals/discovery/OsmTrafficSignalDiscoveryProvider";
 import { buildRouteCorridor } from "@/lib/routing/routeCorridor";
 import { ChainedSignalTimingProvider } from "@/lib/providers/ChainedSignalTimingProvider";
@@ -31,7 +31,7 @@ const OFF_ROUTE_CONFIRM_TICKS = 3;
 const ARRIVAL_RADIUS_M = 30;
 
 export function RouteDriveFlow() {
-  const routingProvider = useMemo(() => new MapboxRoutingProvider(), []);
+  const routingProvider = useMemo(() => new OsrmRoutingProvider(), []);
   const discoveryProvider = useMemo(() => new OsmTrafficSignalDiscoveryProvider(), []);
 
   const origin = useOrigin();
@@ -69,7 +69,7 @@ export function RouteDriveFlow() {
   async function buildRouteAndCorridor(originPt: LatLng, destPt: LatLng, label: string) {
     let nextRoute = getCachedRoute(originPt, destPt);
     if (!nextRoute) {
-      nextRoute = await routingProvider.getRoute(originPt, destPt, { profile: "driving-traffic" });
+      nextRoute = await routingProvider.getRoute(originPt, destPt);
       setCachedRoute(originPt, destPt, nextRoute);
     }
     nextRoute = { ...nextRoute, destinationLabel: label };

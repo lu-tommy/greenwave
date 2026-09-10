@@ -13,9 +13,10 @@ import { NextRequest, NextResponse } from "next/server";
  * of its bounding rectangle.
  */
 
-const OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter";
+const DEFAULT_OVERPASS_ENDPOINT = "https://overpass-api.de/api/interpreter";
 const MAX_POINTS = 400;
 const MAX_RADIUS_M = 100;
+const USER_AGENT = "GreenWave/1.0 (open-source GLOSA app; https://github.com/lu-tommy/greenwave)";
 
 type LatLngIn = { lat: number; lng: number };
 
@@ -36,12 +37,17 @@ export async function POST(req: NextRequest) {
 
   const coordList = points.map((p) => `${p.lat},${p.lng}`).join(",");
   const query = `[out:json][timeout:25];node(around:${radiusM},${coordList})[highway=traffic_signals];out body;`;
+  const endpoint = process.env.OVERPASS_BASE_URL || DEFAULT_OVERPASS_ENDPOINT;
 
   try {
-    const res = await fetch(OVERPASS_ENDPOINT, {
+    const res = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: query,
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": USER_AGENT,
+        Accept: "application/json",
+      },
+      body: `data=${encodeURIComponent(query)}`,
       signal: AbortSignal.timeout(20_000),
     });
 

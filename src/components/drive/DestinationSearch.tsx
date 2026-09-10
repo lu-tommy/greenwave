@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { RoutingUnavailableError } from "@/lib/routing/MapboxRoutingProvider";
+import { RoutingUnavailableError } from "@/lib/routing/OsrmRoutingProvider";
 import { getRecentDestinations } from "@/lib/storage/recentDestinations";
 import type { DestinationCandidate, LatLng, RoutingProvider } from "@/lib/types";
 

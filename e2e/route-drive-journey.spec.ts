@@ -18,9 +18,9 @@ async function selectDestination(page: Page, searchTerm: string, resultText: str
 
 /**
  * Drives the full destination -> route -> discovery -> active drive ->
- * summary journey against MOCKED network responses (no real Mapbox token
- * or Overpass access needed), per the project's requirement that this
- * flow be testable without live credentials. Geolocation is simulated via
+ * summary journey against MOCKED network responses (no live OSRM,
+ * Nominatim, or Overpass access needed), per the project's requirement
+ * that this flow be testable without network access. Geolocation is simulated via
  * Playwright's CDP-backed context.setGeolocation(), which pushes real
  * updates to the page's navigator.geolocation.watchPosition callback.
  */
@@ -175,13 +175,13 @@ test.describe("Route Drive: mocked first-drive journey", () => {
       route.fulfill({ json: { candidates: [{ id: "mock-3", name: "Unreachable Dest", description: "x", location: pointAtDistanceM(ROUTE_DISTANCE_M) }] } }),
     );
     await page.route("**/api/routing/directions**", (route) =>
-      route.fulfill({ status: 501, json: { error: "MAPBOX_TOKEN not configured" } }),
+      route.fulfill({ status: 503, json: { error: "Routing server busy, try again shortly" } }),
     );
 
     await page.goto("/drive", { waitUntil: "domcontentloaded" });
     await selectDestination(page, "Unreachable", "Unreachable Dest");
 
-    await expect(page.getByText(/MAPBOX_TOKEN not configured/i)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/routing server busy/i)).toBeVisible({ timeout: 10_000 });
     expect(pageErrors).toEqual([]);
   });
 });

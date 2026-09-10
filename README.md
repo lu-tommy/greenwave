@@ -24,20 +24,19 @@ npm install
 npm run dev
 ```
 
-Then open `http://localhost:3000`. The Simulator and Corridor Drive work immediately, no setup required. **Route Drive** (destination search + real routing + signal discovery) needs one environment variable — see [Setup: Mapbox token](#setup-mapbox-token) below. Without it, `/drive` shows a clear "routing unavailable" state and points you to the Simulator instead — it never crashes.
+Then open `http://localhost:3000` — everything works immediately, **with no API keys, no accounts, and no credit card, anywhere.** Route Drive's destination search, routing, and signal discovery all run on free, open-source, key-free public services (OSRM, Nominatim, Overpass), proxied through this app's own server routes. See [Setup: routing services](#setup-routing-services) if you want to point at your own self-hosted instances later.
 
-## Setup: Mapbox token
+## Setup: routing services
 
-Route Drive uses [Mapbox](https://www.mapbox.com/) for destination search (Geocoding) and routing (Directions, `mapbox/driving-traffic`). The token is **server-only** — it never reaches the browser:
+Route Drive uses three open, key-free public services, each called through this app's own server-side API routes (never directly from the browser):
 
-```bash
-# .env.local
-MAPBOX_TOKEN=pk.your_token_here
-```
+| Purpose | Service | Env var (optional override) |
+|---|---|---|
+| Destination search (geocoding) | [Nominatim](https://nominatim.openstreetmap.org) | `NOMINATIM_BASE_URL` |
+| Routing (directions) | [OSRM](https://router.project-osrm.org) demo server | `OSRM_BASE_URL` |
+| Traffic signal locations | [Overpass API](https://overpass-api.de) | `OVERPASS_BASE_URL` |
 
-Get a free token at [account.mapbox.com](https://account.mapbox.com/) (the free tier is generous for personal use). All Mapbox calls go through this app's own API routes (`/api/routing/search`, `/api/routing/directions`), which hold the token server-side — see [API proxies](#api-proxies--cors).
-
-Traffic-signal **location** discovery uses the public [Overpass API](https://overpass-api.de/) (OpenStreetMap) and needs no key, also proxied server-side (`/api/signals/discover`).
+None of these need a token, sign-up, or payment method — the app works exactly as cloned. The env vars above are **entirely optional**: they only matter if you outgrow the public demo servers' fair-use limits (they're shared community resources meant for light/personal use, not high-volume production traffic) and want to point at a self-hosted instance instead. Same request shape, drop-in replacement.
 
 ## Architecture
 
@@ -73,7 +72,7 @@ src/
       discovery/        OsmTrafficSignalDiscoveryProvider — turns OSM nodes into DiscoveredSignal[]
     optimizer/         Green-wave optimizer + kinematic arrival estimation (route-aware, unchanged core)
     simulation/        Clock-independent drive simulator
-    routing/           RoutingProvider, MapboxRoutingProvider, route↔corridor adapter, route progress/caching
+    routing/           RoutingProvider, OsrmRoutingProvider, route↔corridor adapter, route progress/caching
     learning/          Passive observation tracking + conservative timing inference
     driveSession/      DriveSessionRecorder — ties a drive's history, observations, and learning together
     geo/               Units, distance/projection, GPS speed smoothing
@@ -88,7 +87,7 @@ src/
                         plus the original DriveView (Corridor Drive) and its geolocation hook
     corridors/         Calibration editor + Real-World Signal Knowledge inspector
   app/
-    api/routing/       Server-side Mapbox proxy (search, directions) — token never reaches the client
+    api/routing/       Server-side proxy to Nominatim (search) and OSRM (directions) — both free, key-free
     api/signals/       Server-side Overpass proxy (signal discovery)
     /, /simulator, /drive, /drive/corridor, /calibration
 ```
@@ -113,7 +112,7 @@ The **speed limit is a hard constraint**, not a scoring penalty — candidates a
 
 ### Routing
 
-`RoutingProvider` (`src/lib/types`) is `{ searchDestination, getRoute }`. `MapboxRoutingProvider` (`src/lib/routing/MapboxRoutingProvider.ts`) is the only implementation, and it never calls Mapbox directly — it calls this app's own `/api/routing/search` and `/api/routing/directions` routes, which hold `MAPBOX_TOKEN` server-side. `getRoute` requests `mapbox/driving-traffic` with full GeoJSON geometry and steps.
+`RoutingProvider` (`src/lib/types`) is `{ searchDestination, getRoute }`. `OsrmRoutingProvider` (`src/lib/routing/OsrmRoutingProvider.ts`) is the only implementation, and it never calls Nominatim/OSRM directly from the browser — it calls this app's own `/api/routing/search` and `/api/routing/directions` routes, which proxy to the public services server-side (adding the descriptive `User-Agent` both ask fair-use clients to send). `getRoute` requests full GeoJSON geometry and turn-by-turn steps from OSRM's `driving` profile.
 
 ### Automatic signal discovery
 
@@ -168,7 +167,7 @@ Before **START DRIVE**, the Route Preview screen checks Location, Routing, Route
 
 ## GPS smoothing, map matching, and offline resilience
 
-GPS speed is smoothed in `src/lib/geo/speedFilter.ts`: prefer the browser's reported speed when available; otherwise derive it from consecutive fixes. A single implausible jump (>4 m/s² implied acceleration) is rejected unless a second consecutive reading agrees with it (a real, sustained change, so the filter can't get permanently stuck). Route Drive currently projects GPS directly onto the already-fetched route geometry (no per-tick network calls) rather than using Mapbox Map Matching — this keeps guidance working offline once a route is loaded and avoids issuing an API request per GPS sample, at the cost of not correcting for GPS drift the way server-side map matching would. Route/signal-discovery network calls happen only at route creation and on a confirmed reroute — never on a normal GPS tick.
+GPS speed is smoothed in `src/lib/geo/speedFilter.ts`: prefer the browser's reported speed when available; otherwise derive it from consecutive fixes. A single implausible jump (>4 m/s² implied acceleration) is rejected unless a second consecutive reading agrees with it (a real, sustained change, so the filter can't get permanently stuck). Route Drive currently projects GPS directly onto the already-fetched route geometry (no per-tick network calls) rather than using a server-side map-matching service — this keeps guidance working offline once a route is loaded and avoids issuing an API request per GPS sample, at the cost of not correcting for GPS drift the way server-side map matching would. Route/signal-discovery network calls happen only at route creation and on a confirmed reroute — never on a normal GPS tick.
 
 ## Safety philosophy
 
@@ -183,7 +182,7 @@ GPS speed is smoothed in `src/lib/geo/speedFilter.ts`: prefer the browser's repo
 
 ## API proxies & CORS
 
-Mapbox and Overpass are both called from Next.js Route Handlers (`src/app/api/routing/*`, `src/app/api/signals/discover`), never directly from the browser: this keeps `MAPBOX_TOKEN` server-only, avoids CORS entirely, and gives one place to handle upstream errors/rate-limits (`501` when the token is missing, `502`/`503` for upstream failures — the client always gets a typed, catchable error, never a crash).
+Nominatim, OSRM, and Overpass are all called from Next.js Route Handlers (`src/app/api/routing/*`, `src/app/api/signals/discover`), never directly from the browser: this avoids CORS entirely, lets each request carry the descriptive `User-Agent` these public services' fair-use policies ask for, and gives one place to handle upstream errors/rate-limits (`502`/`503` for upstream failures — the client always gets a typed, catchable error, never a crash).
 
 ## PWA & mobile Safari
 
@@ -198,17 +197,17 @@ npm run build     # production build + typecheck
 npm run lint       # ESLint
 ```
 
-External APIs never touch the automated tests: Vitest tests use `MockRoutingProvider`/`MockTrafficSignalDiscoveryProvider` (`src/lib/routing/mockProviders.ts`) and IndexedDB is polyfilled with `fake-indexeddb`; the Playwright journey test (`e2e/route-drive-journey.spec.ts`) intercepts `/api/routing/*` and `/api/signals/discover` at the network layer and drives simulated GPS via `context.setGeolocation()` through the real app UI, end to end — destination search, route preview with known/learning signal counts, active drive, arrival, post-drive summary, and debug JSON export — with no Mapbox token or network access required.
+External APIs never touch the automated tests: Vitest tests use `MockRoutingProvider`/`MockTrafficSignalDiscoveryProvider` (`src/lib/routing/mockProviders.ts`) and IndexedDB is polyfilled with `fake-indexeddb`; the Playwright journey test (`e2e/route-drive-journey.spec.ts`) intercepts `/api/routing/*` and `/api/signals/discover` at the network layer and drives simulated GPS via `context.setGeolocation()` through the real app UI, end to end — destination search, route preview with known/learning signal counts, active drive, arrival, post-drive summary, and debug JSON export — with no API keys or network access required.
 
 Notable safety tests: a signal coordinated for ~21 mph is correctly caught by the optimizer on the demo corridor; a green reachable *only* at an illegal speed is never recommended, on any cycle, even a later one; an unknown signal never registers as "green" and never triggers "prepare to stop"; the first GPS fix of a drive (speed 0) doesn't get the recommendation stuck at 0 mph; a wrong-direction/low-confidence OSM signal is excluded from the corridor entirely.
 
 ## Limitations
 
-- Route Drive needs a Mapbox token (free tier) to do anything beyond the "routing unavailable" state — Simulator and Corridor Drive work with zero setup.
+- Route Drive's routing/search/discovery run on public demo servers meant for light use — under heavy or sustained traffic they may rate-limit (the app surfaces this as a clear "try again shortly" state, never a crash); self-host OSRM/Nominatim/Overpass for anything beyond personal use.
 - Direction-applicability confidence for a discovered signal is a heuristic (OSM tagging for signal direction is inconsistent) — it can exclude a genuinely-relevant signal or include a marginal one; the debug panel (Calibration → Real-World Signal Knowledge) is where you'd notice and correct that.
 - Timing inference needs real evidence (stop/depart pairs or manual taps) — most signals on a first drive will be `UNKNOWN`, by design; it takes repeat drives to build usable models.
 - No per-step speed limits from the routing provider are used yet (one conservative corridor-wide limit); no time-of-day timing profiles yet (a model is a single snapshot, though it does decay with staleness).
-- Map matching is local geometric projection onto the fetched route, not Mapbox's server-side map-matching service.
+- Map matching is local geometric projection onto the fetched route, not a server-side map-matching service.
 - Free Drive (no destination, predict the path as you go) is an intentional non-goal for this pass — `FreeDriveRoutePredictor` is a named extension point, not implemented.
 - No accounts, crowdsourcing backend, computer vision, or native app yet — by design (see Roadmap).
 
@@ -218,7 +217,7 @@ Notable safety tests: a signal coordinated for ~21 mph is correctly caught by th
 - Crowdsourced signal timing (aggregate observations across users) and official SPaT/MAP integration where cities publish it.
 - Time-of-day timing profiles instead of one snapshot model per signal.
 - Native iPhone app + CarPlay, reusing the same `src/lib` engine (it has zero React/DOM dependencies).
-- Per-step speed limits and Mapbox Map Matching for higher-fidelity route projection.
+- Per-step speed limits and server-side map matching for higher-fidelity route projection.
 
 ---
 
