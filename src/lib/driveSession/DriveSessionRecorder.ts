@@ -1,7 +1,7 @@
-import { inferTimingModel } from "@/lib/learning/timingInference";
+import { classifyControlType, inferTimingModel, resynchronize } from "@/lib/learning/timingInference";
 import type { ObservationEvent } from "@/lib/learning/observationTracker";
 import { addObservation, getObservationsForSignal } from "@/lib/storage/driveObservationStore";
-import { ensureSignalKnowledge, putSignalKnowledge } from "@/lib/storage/signalKnowledgeStore";
+import { ensureSignalKnowledge, getSignalKnowledge, putSignalKnowledge } from "@/lib/storage/signalKnowledgeStore";
 import { putDriveSession } from "@/lib/storage/driveSessionStore";
 import type { Corridor, DriveObservation, DriveRecommendation, DriveSession, LatLng } from "@/lib/types";
 
@@ -30,6 +30,8 @@ export type DriveDebugExport = {
     distanceAlongCorridorM: number;
     hadTimingModel: boolean;
     confidence: number;
+    controlType: string | null;
+    lastSynchronizedAt: number | null;
   }[];
 };
 
@@ -107,9 +109,24 @@ export class DriveSessionRecorder {
     }
   }
 
-  /** A manual TAP WHEN GREEN / TAP WHEN RED observation, recorded the same way as passive ones. */
-  recordManualObservation(event: ObservationEvent): void {
-    this.observations.push({ id: crypto.randomUUID(), driveSessionId: this.session.id, ...event });
+  /**
+   * A manual TAP WHEN GREEN / TAP WHEN RED observation, recorded the same
+   * way as passive ones. If the signal already has a learned model, a
+   * GREEN_START_MANUAL tap immediately re-anchors its phase offset
+   * (resynchronize) rather than waiting until the drive ends — this is
+   * what makes tapping useful in the moment, not just for next time.
+   */
+  async recordManualObservation(event: ObservationEvent): Promise<void> {
+    const observation = { id: crypto.randomUUID(), driveSessionId: this.session.id, ...event };
+    this.observations.push(observation);
+
+    if (event.type === "GREEN_START_MANUAL") {
+      const existing = await getSignalKnowledge(event.signalId);
+      if (existing?.timingModel) {
+        const resynced = resynchronize(existing.timingModel, observation);
+        await putSignalKnowledge({ ...existing, timingModel: resynced, lastObservedAt: Date.now() });
+      }
+    }
   }
 
   async finish(finalMetrics: { distanceM: number; durationSec: number }): Promise<DrivePostSummary> {
@@ -145,12 +162,14 @@ export class DriveSessionRecorder {
 
       const allObservations = await getObservationsForSignal(signalId);
       const model = inferTimingModel(allObservations);
+      const controlType = classifyControlType(allObservations);
 
       await putSignalKnowledge({
         ...existing,
         timingModel: model,
         observationCount: existing.observationCount + newObs.length,
         lastObservedAt: Date.now(),
+        controlType,
       });
 
       if (model && model.confidence > previousConfidence) improved += 1;
@@ -161,13 +180,18 @@ export class DriveSessionRecorder {
   async exportDebugJson(): Promise<DriveDebugExport> {
     const signalsAtDriveEnd = this.corridorSnapshot
       ? await Promise.all(
-          this.corridorSnapshot.intersections.map(async (i) => ({
-            id: i.id,
-            name: i.name,
-            distanceAlongCorridorM: i.distanceAlongCorridorM,
-            hadTimingModel: i.signalPlan != null,
-            confidence: i.confidence,
-          })),
+          this.corridorSnapshot.intersections.map(async (i) => {
+            const knowledge = await getSignalKnowledge(i.id);
+            return {
+              id: i.id,
+              name: i.name,
+              distanceAlongCorridorM: i.distanceAlongCorridorM,
+              hadTimingModel: i.signalPlan != null,
+              confidence: i.confidence,
+              controlType: knowledge?.controlType ?? null,
+              lastSynchronizedAt: knowledge?.timingModel?.lastSynchronizedAt ?? null,
+            };
+          }),
         )
       : [];
 

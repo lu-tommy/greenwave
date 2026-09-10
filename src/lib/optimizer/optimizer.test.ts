@@ -129,6 +129,7 @@ describe("smoothRecommendation", () => {
     targetSpeedMps: mphToMps(21),
     speedLimitMps: mphToMps(25),
     greenWaveCount: 3,
+    greenWaveDistanceM: 500,
     isGreenWave: true,
     upcoming: [],
     confidence: 0.9,
@@ -236,5 +237,46 @@ describe("optimize: unknown signal timing safety (route mode)", () => {
     const result = optimize(corridor, vehicle);
     expect(result.recommendation.targetSpeedMps).toBeGreaterThan(0);
     expect(result.recommendation.targetSpeedMps).toBeLessThanOrEqual(corridor.speedLimitMps + 1e-6);
+  });
+});
+
+describe("optimize: consumes SignalTimingEstimate (Signal Intelligence) for probabilistic GLOSA", () => {
+  it("prefers a robustly-green arrival over holding a faster speed that arrives too early, once given a timing estimate", () => {
+    // No deterministic plan at all (signalPlan: null) — without a
+    // SignalTimingEstimate, this intersection is scoring-neutral and the
+    // optimizer should just hold close to the current, faster speed.
+    const corridor = makeCorridor([makeIntersection({ distanceAlongCorridorM: 300, signalPlan: null, confidence: 0 })], 30);
+    const vehicle: VehicleState = { timestamp: 0, positionM: 0, speedMps: mphToMps(28) };
+
+    const baseline = optimize(corridor, vehicle);
+    expect(mpsToMph(baseline.recommendation.targetSpeedMps)).toBeGreaterThan(26); // holds near current/legal-max speed
+
+    // A green window [25s, 35s] from now: ~28-30mph arrives too early (red);
+    // ~20mph arrives comfortably inside the window with real margin.
+    const estimate = {
+      source: "OFFICIAL_LIVE" as const,
+      phase: "RED" as const,
+      minEndTime: 25_000,
+      likelyEndTime: 25_000,
+      maxEndTime: 25_000,
+      nextGreenStart: 25_000,
+      nextGreenEnd: 35_000,
+      confidence: 0.97,
+      observedAt: 0,
+      freshnessMs: 0,
+    };
+    const signalEstimates = new Map([[corridor.intersections[0].id, estimate]]);
+
+    const withEstimate = optimize(corridor, vehicle, DEFAULT_CONSTRAINTS, null, false, signalEstimates);
+    expect(mpsToMph(withEstimate.recommendation.targetSpeedMps)).toBeLessThan(24); // materially slower, to land inside the predicted green window
+    expect(withEstimate.recommendation.targetSpeedMps).toBeLessThanOrEqual(corridor.speedLimitMps + 1e-6);
+  });
+
+  it("has zero effect when no estimate is supplied for any upcoming intersection (backward compatible)", () => {
+    const corridor = makeCorridor([makeIntersection({ distanceAlongCorridorM: 300, signalPlan: null, confidence: 0 })], 30);
+    const vehicle: VehicleState = { timestamp: 0, positionM: 0, speedMps: mphToMps(28) };
+    const withoutMap = optimize(corridor, vehicle);
+    const withEmptyMap = optimize(corridor, vehicle, DEFAULT_CONSTRAINTS, null, false, new Map());
+    expect(withEmptyMap.recommendation.targetSpeedMps).toBe(withoutMap.recommendation.targetSpeedMps);
   });
 });

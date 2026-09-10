@@ -1,6 +1,8 @@
 import { getSignalPhaseAtTime, predictSignalState } from "@/lib/signals/signalEngine";
 import { mphToMps } from "@/lib/geo/units";
 import { estimateArrival } from "./kinematics";
+import { estimateArrivalUncertaintySec, robustGreenScore } from "@/lib/signalIntelligence/glosaUncertainty";
+import { CONFIDENCE_THRESHOLDS } from "@/lib/signalIntelligence/confidence";
 import type {
   CandidateSpeedScore,
   Corridor,
@@ -9,9 +11,26 @@ import type {
   Intersection,
   OptimizationResult,
   OptimizerConstraints,
+  SignalTimingEstimate,
   UpcomingLightForecast,
   VehicleState,
 } from "@/lib/types";
+
+/**
+ * Optional richer evidence for a subset of intersections, keyed by
+ * intersection id. When absent for an intersection (the default — nothing
+ * currently supplies this outside Route Drive's Signal Intelligence
+ * wiring), scoring for that intersection is byte-identical to before this
+ * existed: `getSignalPhaseAtTime`/`intersection.signalPlan` still drive
+ * green/red bookkeeping and the deterministic recommendation. When
+ * present, it adds a probabilistic "how robust is this arrival, given
+ * timing AND arrival uncertainty" term on top — see
+ * src/lib/signalIntelligence/glosaUncertainty.ts.
+ */
+export type SignalEstimateMap = ReadonlyMap<string, SignalTimingEstimate>;
+
+const ROBUSTNESS_SCORE_WEIGHT = 12;
+const DEFAULT_GPS_ACCURACY_M = 10;
 
 export const DEFAULT_CONSTRAINTS: OptimizerConstraints = {
   maxAcceleration: 1.5, // m/s^2, ~gentle city acceleration
@@ -63,6 +82,7 @@ function evaluateCandidate(
   upcoming: Intersection[],
   candidateSpeedMps: number,
   constraints: OptimizerConstraints,
+  signalEstimates?: SignalEstimateMap,
 ): CandidateSpeedScore & { forecasts: UpcomingLightForecast[] } {
   let stopsRequired = 0;
   let greensCaught = 0;
@@ -72,6 +92,7 @@ function evaluateCandidate(
   let hardBrakingEvents = 0;
   let hardAccelEvents = 0;
   let lastEtaSec = 0;
+  let robustnessScoreSum = 0;
   const forecasts: UpcomingLightForecast[] = [];
 
   const firstDistance = upcoming.length > 0 ? upcoming[0].distanceAlongCorridorM - vehicle.positionM : Infinity;
@@ -95,6 +116,12 @@ function evaluateCandidate(
     lastEtaSec = etaSec;
     const arrivalTimestamp = vehicle.timestamp + etaSec * 1000;
     const phase = getSignalPhaseAtTime(intersection.signalPlan, arrivalTimestamp);
+
+    const estimate = signalEstimates?.get(intersection.id);
+    if (estimate) {
+      const arrivalUncertaintySec = estimateArrivalUncertaintySec(etaSec, DEFAULT_GPS_ACCURACY_M, Math.max(candidateSpeedMps, 1));
+      robustnessScoreSum += robustGreenScore(estimate, arrivalTimestamp, arrivalUncertaintySec);
+    }
 
     forecasts.push({
       intersectionId: intersection.id,
@@ -127,7 +154,14 @@ function evaluateCandidate(
 
   const progressReward = consecutiveGreens * 28 + greensCaught * 10 - travelTimeSec * 0.4;
 
-  const score = (1 - constraints.comfortWeight) * progressReward - constraints.comfortWeight * comfortPenalty;
+  // Zero when no SignalTimingEstimate was supplied for any upcoming
+  // intersection — existing (demo-corridor, simulator) scoring is
+  // unaffected. When present, this rewards trajectories that land robustly
+  // inside a predicted green window over ones that only work if a
+  // prediction is exact — see glosaUncertainty.ts.
+  const robustnessScore = ROBUSTNESS_SCORE_WEIGHT * robustnessScoreSum;
+
+  const score = (1 - constraints.comfortWeight) * progressReward - constraints.comfortWeight * comfortPenalty + robustnessScore;
 
   return {
     speedMps: candidateSpeedMps,
@@ -222,6 +256,7 @@ export function optimize(
   constraints: OptimizerConstraints = DEFAULT_CONSTRAINTS,
   previousRecommendation: DriveRecommendation | null = null,
   includeCandidates = false,
+  signalEstimates?: SignalEstimateMap,
 ): OptimizationResult {
   const upcoming = getUpcomingIntersections(corridor, vehicle, constraints);
 
@@ -229,11 +264,11 @@ export function optimize(
   const candidates: (CandidateSpeedScore & { forecasts: UpcomingLightForecast[] })[] = [];
 
   for (let s = constraints.minUsefulSpeedMps; s <= speedLimit + 1e-6; s += constraints.speedStepMps) {
-    candidates.push(evaluateCandidate(corridor, vehicle, upcoming, Math.min(s, speedLimit), constraints));
+    candidates.push(evaluateCandidate(corridor, vehicle, upcoming, Math.min(s, speedLimit), constraints, signalEstimates));
   }
   // Always include the exact speed limit and a near-stop candidate as edge cases.
-  candidates.push(evaluateCandidate(corridor, vehicle, upcoming, speedLimit, constraints));
-  candidates.push(evaluateCandidate(corridor, vehicle, upcoming, constraints.minUsefulSpeedMps, constraints));
+  candidates.push(evaluateCandidate(corridor, vehicle, upcoming, speedLimit, constraints, signalEstimates));
+  candidates.push(evaluateCandidate(corridor, vehicle, upcoming, constraints.minUsefulSpeedMps, constraints, signalEstimates));
 
   const feasible = candidates.filter((c) => c.feasible);
   const best = feasible.reduce((a, b) => (b.score > a.score ? b : a), feasible[0]);
@@ -250,11 +285,18 @@ export function optimize(
     nextGreenReachable,
     nextIsUnknown,
   );
+  // A green wave requires each light in the chain to be both green AND
+  // confident enough to trust (>= the ESTIMATED tier floor) — a low-
+  // confidence or unknown signal breaks the chain rather than silently
+  // continuing it, so "GREEN WAVE" is never claimed on shaky evidence.
   const greenWaveCount = best.forecasts.reduce((count, f, idx) => {
-    if (idx === count && f.predictedPhaseAtArrival === "green") return count + 1;
+    if (idx === count && f.predictedPhaseAtArrival === "green" && f.arrivalConfidence >= CONFIDENCE_THRESHOLDS.ESTIMATED) {
+      return count + 1;
+    }
     return count;
   }, 0);
   const isGreenWave = greenWaveCount >= 2;
+  const greenWaveDistanceM = greenWaveCount > 0 ? best.forecasts[greenWaveCount - 1].distanceM : 0;
 
   const nextGreenAtFromNow = upcoming.length > 0 ? predictSignalState(upcoming[0], vehicle.timestamp).nextGreenAt : null;
   const secondsToNextGreenFromNow = nextGreenAtFromNow != null ? (nextGreenAtFromNow - vehicle.timestamp) / 1000 : null;
@@ -277,6 +319,7 @@ export function optimize(
     targetSpeedMps: Math.min(conservativeSpeed, speedLimit),
     speedLimitMps: speedLimit,
     greenWaveCount,
+    greenWaveDistanceM,
     isGreenWave,
     upcoming: best.forecasts,
     confidence,

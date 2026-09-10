@@ -6,6 +6,8 @@
  * mph/feet/miles happens only at display boundaries (see src/lib/geo/units.ts).
  */
 
+import type { ControlTypeClassification } from "./signalIntelligence";
+
 /**
  * "unknown" means we have no trustworthy timing model for this signal at
  * all (its plan is `null`) — the engine must never report a green/yellow/red
@@ -116,8 +118,10 @@ export type DriveRecommendation = {
   /** Recommended target speed, meters/second. Always <= corridor speed limit. */
   targetSpeedMps: number;
   speedLimitMps: number;
-  /** Number of consecutive upcoming greens this trajectory is expected to catch. */
+  /** Number of consecutive upcoming greens this trajectory is expected to catch, all at sufficient confidence — an unknown or low-confidence signal breaks the chain. */
   greenWaveCount: number;
+  /** Distance (m) to the last light in that consecutive chain. 0 if greenWaveCount is 0. */
+  greenWaveDistanceM: number;
   /** True when the recommendation reflects a real coordinated green-wave streak (>=2). */
   isGreenWave: boolean;
   upcoming: UpcomingLightForecast[];
@@ -358,6 +362,9 @@ export type LearnedTimingModel = SignalPlan & {
   /** How many anchor observations contributed. */
   sampleCount: number;
   updatedAt: number;
+  /** Set when a high-quality anchor (a manual tap) has re-anchored `offsetSec` without relearning the full cycle — see resynchronize() in timingInference.ts. */
+  lastSynchronizedAt?: number;
+  synchronizationConfidence?: Confidence;
 };
 
 export type SignalKnowledgeRecord = {
@@ -371,6 +378,8 @@ export type SignalKnowledgeRecord = {
   observationCount: number;
   firstObservedAt: number;
   lastObservedAt: number;
+  /** Absent until classifyControlType() has run at least once (needs MIN_ANCHORS observations). */
+  controlType?: ControlTypeClassification;
 };
 
 export type ObservationType =
@@ -413,3 +422,9 @@ export type DriveSession = {
   stops: number;
   observationIds: string[];
 };
+
+// The Signal Intelligence layer's normalized model (SignalSource,
+// SignalApproach, SignalTimingEvidence/Estimate, SPaT-native types, ...)
+// lives in its own file for organization, but is re-exported here so every
+// existing `import type {...} from "@/lib/types"` keeps working unchanged.
+export * from "./signalIntelligence";

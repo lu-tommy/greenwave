@@ -1,4 +1,4 @@
-import type { DriveObservation, LearnedTimingModel } from "@/lib/types";
+import type { ControlTypeClassification, DriveObservation, LearnedTimingModel } from "@/lib/types";
 
 /**
  * Conservative, non-ML timing inference from passive/manual real-drive
@@ -51,6 +51,31 @@ function circularFit(anchors: WeightedAnchor[], cycleSec: number): { meanPhaseSe
   return { meanPhaseSec, resultantLength };
 }
 
+function extractAnchors(observations: DriveObservation[]): WeightedAnchor[] {
+  return observations
+    .filter((o) => o.type === "GREEN_START_MANUAL" || o.type === "DEPART_SIGNAL")
+    .map((o) => ({ phaseSec: o.timestamp / 1000, weight: o.confidence, timestamp: o.timestamp }));
+}
+
+/**
+ * Finds the candidate cycle length the anchors cluster most tightly
+ * around. Shared by `inferTimingModel` (which additionally requires red
+ * evidence to produce a full plan) and `classifyControlType` (which only
+ * needs the fit quality itself).
+ */
+function bestCycleFit(anchors: WeightedAnchor[]): { cycleSec: number; meanPhaseSec: number; resultantLength: number } | null {
+  let best: { cycleSec: number; meanPhaseSec: number; resultantLength: number } | null = null;
+  for (const cycleSec of CANDIDATE_CYCLES_SEC) {
+    const { meanPhaseSec, resultantLength } = circularFit(anchors, cycleSec);
+    const isBetter =
+      !best ||
+      resultantLength > best.resultantLength + 1e-9 ||
+      (Math.abs(resultantLength - best.resultantLength) <= 1e-9 && cycleSec > best.cycleSec);
+    if (isBetter) best = { cycleSec, meanPhaseSec, resultantLength };
+  }
+  return best;
+}
+
 function estimateRedSec(observations: DriveObservation[]): number | null {
   const waits: number[] = [];
   for (let i = 0; i < observations.length - 1; i++) {
@@ -73,10 +98,7 @@ function estimateRedSec(observations: DriveObservation[]): number | null {
  * expected, common result for a signal seen only once or twice.
  */
 export function inferTimingModel(observations: DriveObservation[]): LearnedTimingModel | null {
-  const anchors: WeightedAnchor[] = observations
-    .filter((o) => o.type === "GREEN_START_MANUAL" || o.type === "DEPART_SIGNAL")
-    .map((o) => ({ phaseSec: o.timestamp / 1000, weight: o.confidence, timestamp: o.timestamp }));
-
+  const anchors = extractAnchors(observations);
   if (anchors.length < MIN_ANCHORS) return null;
 
   // Harmonics/sub-multiples of the true cycle can fit anchors just as well
@@ -84,17 +106,7 @@ export function inferTimingModel(observations: DriveObservation[]): LearnedTimin
   // candidate). On a tie, prefer the larger candidate cycle — real urban
   // signal cycles are rarely under ~30s, and assuming the smallest fitting
   // period is more likely to alias than assuming the largest.
-  let best: { cycleSec: number; meanPhaseSec: number; resultantLength: number } | null = null;
-  for (const cycleSec of CANDIDATE_CYCLES_SEC) {
-    const { meanPhaseSec, resultantLength } = circularFit(anchors, cycleSec);
-    const isBetter =
-      !best ||
-      resultantLength > best.resultantLength + 1e-9 ||
-      (Math.abs(resultantLength - best.resultantLength) <= 1e-9 && cycleSec > best.cycleSec);
-    if (isBetter) {
-      best = { cycleSec, meanPhaseSec, resultantLength };
-    }
-  }
+  const best = bestCycleFit(anchors);
 
   if (!best || best.resultantLength < MIN_RESULTANT_LENGTH) return null;
 
@@ -136,4 +148,42 @@ export function recencyConfidenceFactor(lastObservedAt: number, now: number = Da
 export function decayModelConfidence(model: LearnedTimingModel, now: number = Date.now()): LearnedTimingModel {
   const factor = recencyConfidenceFactor(model.updatedAt, now);
   return { ...model, confidence: model.confidence * factor };
+}
+
+/**
+ * Classifies whether a signal looks fixed/coordinated (green-start anchors
+ * cluster tightly around one cycle length) or likely actuated (they don't,
+ * or the "cycle" varies too much to trust). This does not attempt to
+ * predict an actuated signal with a fixed-cycle model — that's exactly
+ * what a mis-classification would risk, so `inferTimingModel` and this
+ * function use the same fit-quality threshold to stay consistent.
+ */
+export function classifyControlType(observations: DriveObservation[]): ControlTypeClassification {
+  const anchors = extractAnchors(observations);
+  if (anchors.length < MIN_ANCHORS) return "UNKNOWN_CONTROL_TYPE";
+  const best = bestCycleFit(anchors);
+  if (!best) return "UNKNOWN_CONTROL_TYPE";
+  return best.resultantLength >= MIN_RESULTANT_LENGTH ? "FIXED_OR_COORDINATED" : "LIKELY_ACTUATED";
+}
+
+/**
+ * Re-anchors a learned model's phase offset from one new, high-quality
+ * observation (a manual "TAP WHEN GREEN") without relearning the whole
+ * cycle — cheaper and more responsive than waiting to re-run full
+ * inference, and appropriate because a manual tap is strong, immediate
+ * evidence of exactly when this cycle instance turned green. Only manual
+ * anchors resynchronize; passive DEPART_SIGNAL events are too weak on
+ * their own (a slow departure could lag the actual green start by a
+ * couple of seconds) to justify moving an established offset.
+ */
+export function resynchronize(model: LearnedTimingModel, anchor: DriveObservation, now: number = Date.now()): LearnedTimingModel {
+  if (anchor.type !== "GREEN_START_MANUAL") return model;
+  const anchorPhaseSec = anchor.timestamp / 1000;
+  const offsetSec = ((anchorPhaseSec % model.cycleSec) + model.cycleSec) % model.cycleSec;
+  return {
+    ...model,
+    offsetSec,
+    lastSynchronizedAt: now,
+    synchronizationConfidence: anchor.confidence,
+  };
 }

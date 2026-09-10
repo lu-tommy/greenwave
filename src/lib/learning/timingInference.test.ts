@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { decayModelConfidence, inferTimingModel } from "./timingInference";
-import type { DriveObservation } from "@/lib/types";
+import { classifyControlType, decayModelConfidence, inferTimingModel, resynchronize } from "./timingInference";
+import type { DriveObservation, LearnedTimingModel } from "@/lib/types";
 
 const T0 = Date.UTC(2026, 5, 1, 8, 0, 0);
 
@@ -113,5 +113,56 @@ describe("decayModelConfidence", () => {
     const sixtyDaysLater = T0 + 1000 * 60 * 60 * 24 * 60;
     const decayed = decayModelConfidence(model, sixtyDaysLater);
     expect(decayed.confidence).toBeLessThan(model.confidence);
+  });
+});
+
+describe("classifyControlType", () => {
+  it("classifies a signal whose green-start anchors line up tightly as FIXED_OR_COORDINATED", () => {
+    const CYCLE = 60_000;
+    const observations: DriveObservation[] = [];
+    for (let k = 0; k < 5; k++) {
+      observations.push(obs({ type: "GREEN_START_MANUAL", timestamp: T0 + k * CYCLE, confidence: 0.95 }));
+    }
+    expect(classifyControlType(observations)).toBe("FIXED_OR_COORDINATED");
+  });
+
+  it("classifies a signal with wildly inconsistent green-start timing as LIKELY_ACTUATED", () => {
+    // No consistent cycle: gaps of 17s, 63s, 121s, 8s between arbitrary anchors.
+    const timestamps = [T0, T0 + 17_000, T0 + 80_000, T0 + 201_000, T0 + 209_000];
+    const observations = timestamps.map((t) => obs({ type: "GREEN_START_MANUAL", timestamp: t, confidence: 0.9 }));
+    expect(classifyControlType(observations)).toBe("LIKELY_ACTUATED");
+  });
+
+  it("returns UNKNOWN_CONTROL_TYPE with too few anchor observations", () => {
+    const observations = [obs({ type: "GREEN_START_MANUAL", timestamp: T0 })];
+    expect(classifyControlType(observations)).toBe("UNKNOWN_CONTROL_TYPE");
+  });
+});
+
+describe("resynchronize", () => {
+  const baseModel: LearnedTimingModel = {
+    cycleSec: 60,
+    greenSec: 28,
+    yellowSec: 3,
+    redSec: 29,
+    offsetSec: 10,
+    confidence: 0.7,
+    sampleCount: 5,
+    updatedAt: T0,
+  };
+
+  it("re-anchors offsetSec from a manual green-start anchor without changing cycleSec", () => {
+    const anchor = obs({ type: "GREEN_START_MANUAL", timestamp: T0 + 125_000, confidence: 0.95 }); // 125s -> pos 5s within a 60s cycle
+    const resynced = resynchronize(baseModel, anchor, T0 + 200_000);
+    expect(resynced.cycleSec).toBe(60); // unchanged — resync never relearns the cycle
+    expect(resynced.offsetSec).toBeCloseTo(5, 5);
+    expect(resynced.lastSynchronizedAt).toBe(T0 + 200_000);
+    expect(resynced.synchronizationConfidence).toBe(0.95);
+  });
+
+  it("does not resynchronize from a weaker, passive DEPART_SIGNAL observation", () => {
+    const anchor = obs({ type: "DEPART_SIGNAL", timestamp: T0 + 125_000, confidence: 0.35 });
+    const result = resynchronize(baseModel, anchor);
+    expect(result).toBe(baseModel); // untouched
   });
 });

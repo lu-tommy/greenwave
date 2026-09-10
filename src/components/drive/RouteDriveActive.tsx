@@ -3,6 +3,8 @@ import { UpcomingLightsList } from "@/components/ui/UpcomingLightsList";
 import { SafetyDisclaimer } from "@/components/ui/SafetyDisclaimer";
 import { DataSourceBadge, SpeedLimitBadge } from "@/components/ui/SpeedLimitBadge";
 import { CorridorMap } from "@/components/map/CorridorMap";
+import { TimeToGreenDisplay } from "./TimeToGreenDisplay";
+import type { TimeToGreenState } from "@/lib/signalIntelligence/timeToGreen";
 import type { Corridor, DriveRecommendation } from "@/lib/types";
 
 export function RouteDriveActive({
@@ -14,6 +16,7 @@ export function RouteDriveActive({
   rerouting,
   nextUnknownSignal,
   onTapWhenGreen,
+  timeToGreen,
 }: {
   corridor: Corridor;
   recommendation: DriveRecommendation | null;
@@ -23,7 +26,13 @@ export function RouteDriveActive({
   rerouting: boolean;
   nextUnknownSignal: { id: string; name: string } | null;
   onTapWhenGreen: (signalId: string) => void;
+  timeToGreen: TimeToGreenState;
 }) {
+  // Exactly two primary states, per product design: stopped at a
+  // trustworthy red shows Time-to-Green; everything else (moving, or
+  // stopped with insufficient evidence) shows the GLOSA speed hero.
+  const showTimeToGreen = !offRoute && timeToGreen.status !== "UNAVAILABLE";
+
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 pb-[max(env(safe-area-inset-bottom),1rem)] sm:p-6">
       {offRoute && (
@@ -38,9 +47,10 @@ export function RouteDriveActive({
           <DataSourceBadge label={corridor.dataSourceLabel} />
           <SpeedLimitBadge speedLimitMps={corridor.speedLimitMps} />
         </div>
-        <RecommendationHero recommendation={offRoute ? null : recommendation} />
 
-        {!offRoute && nextUnknownSignal && (
+        {showTimeToGreen ? <TimeToGreenDisplay state={timeToGreen} /> : <RecommendationHero recommendation={offRoute ? null : recommendation} />}
+
+        {!offRoute && !showTimeToGreen && nextUnknownSignal && (
           <button
             onClick={() => onTapWhenGreen(nextUnknownSignal.id)}
             className="mt-5 w-full rounded-xl border-2 border-dashed border-foreground-dim py-4 text-sm font-semibold tracking-wide text-foreground-muted transition-colors hover:border-accent-green hover:text-accent-green active:opacity-80"

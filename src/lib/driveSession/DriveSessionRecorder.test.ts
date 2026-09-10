@@ -47,6 +47,7 @@ describe("DriveSessionRecorder", () => {
       targetSpeedMps: 5,
       speedLimitMps: 11.2,
       greenWaveCount: 0,
+      greenWaveDistanceM: 0,
       isGreenWave: false,
       upcoming: [],
       confidence: 0,
@@ -70,7 +71,7 @@ describe("DriveSessionRecorder", () => {
     const WAIT = 20_000;
     for (let k = 0; k < 4; k++) {
       const greenAt = T0 + k * CYCLE;
-      recorder.recordManualObservation({
+      await recorder.recordManualObservation({
         signalId: "osm:node:a",
         type: "GREEN_START_MANUAL",
         timestamp: greenAt,
@@ -104,6 +105,7 @@ describe("DriveSessionRecorder", () => {
       targetSpeedMps: 5,
       speedLimitMps: 11.2,
       greenWaveCount: 0,
+      greenWaveDistanceM: 0,
       isGreenWave: false,
       upcoming: [],
       confidence: 0,
@@ -129,6 +131,7 @@ describe("DriveSessionRecorder", () => {
       targetSpeedMps: 5,
       speedLimitMps: 11.2,
       greenWaveCount: 0,
+      greenWaveDistanceM: 0,
       isGreenWave: false,
       upcoming: [],
       confidence: 0,

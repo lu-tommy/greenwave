@@ -14,6 +14,10 @@ import { initialSpeedFilterState, updateSpeedFilter } from "@/lib/geo/speedFilte
 import { optimize, DEFAULT_CONSTRAINTS } from "@/lib/optimizer/optimizer";
 import { ObservationTracker, makeManualObservation } from "@/lib/learning/observationTracker";
 import { DriveSessionRecorder, type DrivePostSummary } from "@/lib/driveSession/DriveSessionRecorder";
+import { SignalIntelligenceEngine, type SignalIntelligenceResult } from "@/lib/signalIntelligence/SignalIntelligenceEngine";
+import { LegacyTimingProviderAdapter } from "@/lib/signalIntelligence/legacyAdapter";
+import { buildRouteSignalIntelligence } from "@/lib/signalIntelligence/routeSignalIntelligence";
+import { computeTimeToGreen, type TimeToGreenState } from "@/lib/signalIntelligence/timeToGreen";
 import { useOrigin } from "./useOrigin";
 import { useWakeLock } from "./useWakeLock";
 import { DestinationSearch } from "./DestinationSearch";
@@ -22,7 +26,19 @@ import { RouteDriveActive } from "./RouteDriveActive";
 import { DriveSummary } from "./DriveSummary";
 import { SafetyDisclaimer } from "@/components/ui/SafetyDisclaimer";
 import Link from "next/link";
-import type { Corridor, DestinationCandidate, DriveRecommendation, LatLng, Route } from "@/lib/types";
+import type { Corridor, DestinationCandidate, DiscoveredSignal, DriveRecommendation, LatLng, Route, SignalTimingEstimate } from "@/lib/types";
+
+/**
+ * How often Signal Intelligence is re-fused against the real clock during
+ * an active drive. Manual/Learned evidence itself barely changes
+ * (minutes/days), but the *absolute-timestamp window* it implies (next
+ * green start/end) is only correct as of the moment it's computed — a
+ * cyclic signal's "next green" a build-time snapshot pointed to can be
+ * long past by the time a real drive reaches it. Refreshing every couple
+ * of seconds keeps GLOSA's robustness scoring and Time-to-Green accurate
+ * without adding per-GPS-tick IndexedDB/localStorage reads.
+ */
+const SIGNAL_INTELLIGENCE_REFRESH_MS = 2000;
 
 type Step = "destination" | "preparing" | "preview" | "active" | "summary";
 
@@ -48,6 +64,7 @@ export function RouteDriveFlow() {
   const [offRoute, setOffRoute] = useState(false);
   const [rerouting, setRerouting] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
+  const [timeToGreen, setTimeToGreen] = useState<TimeToGreenState>({ status: "UNAVAILABLE" });
 
   const recorderRef = useRef<DriveSessionRecorder | null>(null);
   const trackerRef = useRef(new ObservationTracker());
@@ -57,6 +74,45 @@ export function RouteDriveFlow() {
   const maxDistanceMRef = useRef(0);
   const offRouteStreakRef = useRef(0);
   const lastPositionRef = useRef<LatLng | null>(null);
+  const lastSpeedMpsRef = useRef(0);
+  // Per-signal fused evidence (Signal Intelligence). Built when the
+  // route/corridor is built (and on reroute), then re-fused on a
+  // SIGNAL_INTELLIGENCE_REFRESH_MS interval while actively driving — never
+  // per GPS tick, since IndexedDB reads have no place in that hot path.
+  // The refresh is still necessary: Manual/Learned evidence itself barely
+  // changes, but the absolute-timestamp window it implies (next green
+  // start/end) for a cyclic signal is only valid as of the moment it was
+  // computed, and goes stale as real time passes during the drive.
+  const signalIntelligenceRef = useRef<Map<string, SignalIntelligenceResult>>(new Map());
+  const signalEstimatesRef = useRef<Map<string, SignalTimingEstimate>>(new Map());
+  const discoveredSignalsRef = useRef<DiscoveredSignal[]>([]);
+  const routeRef = useRef<Route | null>(null);
+  const intelligenceEngine = useMemo(
+    () =>
+      new SignalIntelligenceEngine([
+        new LegacyTimingProviderAdapter(new ManualSignalTimingProvider(), "MANUAL"),
+        new LegacyTimingProviderAdapter(new LearnedSignalTimingProvider(), "LEARNED"),
+      ]),
+    [],
+  );
+
+  // Recomputes Time-to-Green for whichever signal was last identified as
+  // "next up", against a caller-supplied `now`. Called from both the GPS
+  // tick (using the fix's own timestamp) and the periodic Signal
+  // Intelligence refresh (using the real clock) — the latter is what keeps
+  // the on-screen countdown honest between GPS fixes, since a driver
+  // stopped at a red light can go many seconds without a new GPS update.
+  function refreshTimeToGreenDisplay(now: number) {
+    const nextSignalId = lastRecommendationRef.current?.upcoming[0]?.intersectionId;
+    const nextSignalResult = nextSignalId ? signalIntelligenceRef.current.get(nextSignalId) : undefined;
+    setTimeToGreen(
+      computeTimeToGreen(
+        nextSignalResult ?? { estimate: null, tier: "UNAVAILABLE", preciseCountdownAllowed: false, glosaAllowed: false },
+        lastSpeedMpsRef.current,
+        now,
+      ),
+    );
+  }
 
   useWakeLock(step === "active");
 
@@ -85,7 +141,17 @@ export function RouteDriveFlow() {
       new LearnedSignalTimingProvider(),
     ]);
     const nextCorridor = await buildRouteCorridor(nextRoute, signals, timingProvider);
-    return { route: nextRoute, corridor: nextCorridor };
+
+    const intelligence = await buildRouteSignalIntelligence(nextRoute, signals, intelligenceEngine, Date.now());
+    const estimates = new Map<string, SignalTimingEstimate>();
+    for (const [signalId, result] of intelligence) {
+      if (result.estimate) estimates.set(signalId, result.estimate);
+    }
+
+    discoveredSignalsRef.current = signals;
+    routeRef.current = nextRoute;
+
+    return { route: nextRoute, corridor: nextCorridor, intelligence, estimates };
   }
 
   async function handleSelectDestination(candidate: DestinationCandidate) {
@@ -95,9 +161,15 @@ export function RouteDriveFlow() {
     setStep("preparing");
     setPrepError(null);
     try {
-      const { route: nextRoute, corridor: nextCorridor } = await buildRouteAndCorridor(origin.origin, candidate.location, candidate.name);
+      const { route: nextRoute, corridor: nextCorridor, intelligence, estimates } = await buildRouteAndCorridor(
+        origin.origin,
+        candidate.location,
+        candidate.name,
+      );
       setRoute(nextRoute);
       setCorridor(nextCorridor);
+      signalIntelligenceRef.current = intelligence;
+      signalEstimatesRef.current = estimates;
       setStep("preview");
     } catch (err) {
       const message =
@@ -120,6 +192,7 @@ export function RouteDriveFlow() {
     offRouteStreakRef.current = 0;
     setOffRoute(false);
     setGpsError(null);
+    setTimeToGreen({ status: "UNAVAILABLE" });
     setStep("active");
   }
 
@@ -127,9 +200,15 @@ export function RouteDriveFlow() {
     if (!destination || rerouting) return;
     setRerouting(true);
     try {
-      const { route: nextRoute, corridor: nextCorridor } = await buildRouteAndCorridor(currentPosition, destination.location, destination.name);
+      const { route: nextRoute, corridor: nextCorridor, intelligence, estimates } = await buildRouteAndCorridor(
+        currentPosition,
+        destination.location,
+        destination.name,
+      );
       setRoute(nextRoute);
       setCorridor(nextCorridor);
+      signalIntelligenceRef.current = intelligence;
+      signalEstimatesRef.current = estimates;
       trackerRef.current.reset();
       lastRecommendationRef.current = null;
       offRouteStreakRef.current = 0;
@@ -186,8 +265,15 @@ export function RouteDriveFlow() {
         setOffRoute(false);
 
         const vehicle = { timestamp: pos.timestamp, positionM: projection.distanceAlongM, speedMps: speed };
-        const result = optimize(corridor, vehicle, DEFAULT_CONSTRAINTS, lastRecommendationRef.current, false);
+        const result = optimize(corridor, vehicle, DEFAULT_CONSTRAINTS, lastRecommendationRef.current, false, signalEstimatesRef.current);
         lastRecommendationRef.current = result.recommendation;
+        lastSpeedMpsRef.current = speed;
+
+        // Time-to-Green: only meaningful for the single next relevant
+        // signal, using its fused evidence (not the corridor's plain
+        // signalPlan-derived confidence) so tier gating (HIGH/ESTIMATED/
+        // UNAVAILABLE) reflects the Signal Intelligence layer's rules.
+        refreshTimeToGreenDisplay(pos.timestamp);
 
         recorderRef.current?.recordTick(vehicle, result.recommendation, corridor);
         const events = trackerRef.current.processTick(
@@ -217,6 +303,41 @@ export function RouteDriveFlow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, corridor]);
 
+  // Re-fuse Signal Intelligence against the real clock periodically while
+  // driving, so a cyclic Manual/Learned signal's "next green" window
+  // doesn't go stale as time passes between corridor build and now.
+  useEffect(() => {
+    if (step !== "active") return;
+
+    const refresh = async () => {
+      const nextRoute = routeRef.current;
+      if (!nextRoute) return;
+      const intelligence = await buildRouteSignalIntelligence(
+        nextRoute,
+        discoveredSignalsRef.current,
+        intelligenceEngine,
+        Date.now(),
+      );
+      const estimates = new Map<string, SignalTimingEstimate>();
+      for (const [signalId, result] of intelligence) {
+        if (result.estimate) estimates.set(signalId, result.estimate);
+      }
+      signalIntelligenceRef.current = intelligence;
+      signalEstimatesRef.current = estimates;
+      // Push the display update immediately too — without this, a driver
+      // stopped at a red light (infrequent GPS fixes) would only see
+      // Time-to-Green change on the next GPS tick, which defeats the point
+      // of refreshing against the real clock in between fixes.
+      refreshTimeToGreenDisplay(Date.now());
+    };
+
+    const intervalId = setInterval(() => {
+      void refresh();
+    }, SIGNAL_INTELLIGENCE_REFRESH_MS);
+
+    return () => clearInterval(intervalId);
+  }, [step, intelligenceEngine]);
+
   function handleTapWhenGreen(signalId: string) {
     if (!lastPositionRef.current || !corridor) return;
     const signal = corridor.intersections.find((i) => i.id === signalId);
@@ -234,7 +355,7 @@ export function RouteDriveFlow() {
       },
       distanceToSignalM,
     );
-    recorderRef.current?.recordManualObservation(event);
+    void recorderRef.current?.recordManualObservation(event);
   }
 
   async function handleExportDebugJson() {
@@ -271,6 +392,7 @@ export function RouteDriveFlow() {
         rerouting={rerouting}
         nextUnknownSignal={nextUnknownSignal}
         onTapWhenGreen={handleTapWhenGreen}
+        timeToGreen={timeToGreen}
       />
     );
   }
