@@ -17,14 +17,45 @@ The app answers this with guidance like `HOLD 21 MPH`, `COAST TO 16 MPH`, `SLOW 
 
 Both modes share one optimization engine — there is no separate "route" optimizer and "demo" optimizer.
 
-## Try it
+## Getting started
+
+### Prerequisites
+
+- **Node.js 20.9 or newer** (built and tested on 22.x — an `.nvmrc` is included, so `nvm use` picks the right version automatically). Check with `node --version`; on macOS, [nvm](https://github.com/nvm-sh/nvm) or `brew install node` both work fine.
+- npm (ships with Node — no separate install).
+- That's it. No database, no Docker, no paid accounts.
+
+### Clone, install, run
 
 ```bash
+git clone https://github.com/lu-tommy/greenwave.git
+cd greenwave
 npm install
 npm run dev
 ```
 
-Then open `http://localhost:3000` — everything works immediately, **with no API keys, no accounts, and no credit card, anywhere.** Route Drive's destination search, routing, and signal discovery all run on free, open-source, key-free public services (OSRM, Nominatim, Overpass), proxied through this app's own server routes. See [Setup: routing services](#setup-routing-services) if you want to point at your own self-hosted instances later.
+Open `http://localhost:3000`. **Everything works immediately — no API keys, no accounts, and no credit card, anywhere.** Route Drive's destination search, routing, and signal discovery all run on free, open-source, key-free public services (OSRM, Nominatim, Overpass), proxied through this app's own server routes. See [Setup: routing services](#setup-routing-services) below if you ever want to point at your own self-hosted instances instead — entirely optional.
+
+### Running the tests
+
+```bash
+npm test                         # Vitest — 126 unit/integration tests, no setup needed
+npx playwright install chromium  # one-time browser download, needed before e2e tests
+npm run test:e2e                 # Playwright — 6 end-to-end flows (all network-mocked)
+npm run build                    # production build + typecheck
+npm run lint                     # ESLint
+```
+
+All of the above run identically on macOS, Linux, and Windows — nothing in this repo is OS-specific.
+
+### Testing Route Drive on your phone
+
+The GPS features (Route Drive, Corridor Drive) need a secure (HTTPS) origin and an actual device — `localhost` in a desktop browser can't give you real GPS movement. To try it on your phone while `npm run dev` is running on your computer, tunnel port 3000 over HTTPS:
+
+- **Tailscale** (if you already use it): `tailscale serve https / http://localhost:3000`, then open the printed `https://<machine>.<tailnet>.ts.net` URL on your phone (same tailnet, Tailscale app installed there too).
+- **ngrok**: `ngrok http 3000`, then open the HTTPS URL it prints, from any device.
+
+On your phone: open that URL → **Drive Mode** → allow location → enter a destination → **START DRIVE**.
 
 ## Setup: routing services
 
