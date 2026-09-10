@@ -194,3 +194,35 @@ describe("getGreenWindows", () => {
     }
   });
 });
+
+describe("unknown (null) signal plans — must never be treated as green", () => {
+  it("getSignalPhaseAtTime returns 'unknown' for a null plan", () => {
+    expect(getSignalPhaseAtTime(null, atSec(20))).toBe("unknown");
+  });
+
+  it("getNextPhaseTransition returns null for a null plan", () => {
+    expect(getNextPhaseTransition(null, atSec(20))).toBeNull();
+  });
+
+  it("getGreenWindows returns an empty array for a null plan", () => {
+    expect(getGreenWindows(null, atSec(0), 300)).toEqual([]);
+  });
+
+  it("predictSignalState returns phase 'unknown' with all timing fields null for a null plan", () => {
+    const intersection: Intersection = {
+      id: "int-unknown",
+      name: "Unknown Signal",
+      lat: 0,
+      lng: 0,
+      distanceAlongCorridorM: 0,
+      signalPlan: null,
+      confidence: 0,
+    };
+    const pred = predictSignalState(intersection, atSec(20));
+    expect(pred.phase).toBe("unknown");
+    expect(pred.secondsRemainingInPhase).toBeNull();
+    expect(pred.nextTransitionAt).toBeNull();
+    expect(pred.nextGreenAt).toBeNull();
+    expect(pred.nextGreenEndsAt).toBeNull();
+  });
+});

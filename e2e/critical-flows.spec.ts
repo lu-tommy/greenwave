@@ -35,7 +35,7 @@ test.describe("Simulator: perfect green wave end-to-end", () => {
   });
 });
 
-test.describe("Drive Mode: graceful degradation without GPS", () => {
+test.describe("Corridor Drive Mode: graceful degradation without GPS", () => {
   test.use({ permissions: [] });
 
   test("shows the location prompt and falls back cleanly when access is denied", async ({ page, context }) => {
@@ -43,7 +43,9 @@ test.describe("Drive Mode: graceful degradation without GPS", () => {
     const pageErrors: string[] = [];
     page.on("pageerror", (err) => pageErrors.push(err.message));
 
-    await page.goto("/drive", { waitUntil: "domcontentloaded" });
+    // The manual-corridor drive mode (secondary flow) lives at /drive/corridor —
+    // /drive itself is now the primary destination-based flow (see route-drive-journey.spec.ts).
+    await page.goto("/drive/corridor", { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("button", { name: /enable location/i })).toBeVisible();
 
     await page.getByRole("button", { name: /enable location/i }).click();

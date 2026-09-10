@@ -53,19 +53,18 @@ export function phaseAtCyclePosition(plan: SignalPlan, pos: number): SignalPhase
   return "red";
 }
 
-/** Returns the phase a signal is in at an arbitrary timestamp (epoch ms). */
-export function getSignalPhaseAtTime(plan: SignalPlan, timestampMs: number): SignalPhaseName {
+/**
+ * Returns the phase a signal is in at an arbitrary timestamp (epoch ms).
+ * `plan === null` means no trustworthy timing model exists — always
+ * "unknown" in that case, never a guessed green/yellow/red.
+ */
+export function getSignalPhaseAtTime(plan: SignalPlan | null, timestampMs: number): SignalPhaseName {
+  if (plan == null) return "unknown";
   assertValidPlan(plan);
   return phaseAtCyclePosition(plan, cyclePosition(plan, timestampMs));
 }
 
-/**
- * Returns the epoch-ms timestamp of the next phase transition strictly
- * after `timestampMs` (i.e. if you are exactly at a boundary, this returns
- * the *following* boundary, not the current instant).
- */
-export function getNextPhaseTransition(plan: SignalPlan, timestampMs: number): number {
-  assertValidPlan(plan);
+function nextPhaseTransitionForPlan(plan: SignalPlan, timestampMs: number): number {
   const pos = cyclePosition(plan, timestampMs);
   const boundaries = [plan.greenSec, plan.greenSec + plan.yellowSec, plan.cycleSec];
   const nextBoundary = boundaries.find((b) => b > pos + 1e-9) ?? plan.cycleSec + boundaries[0];
@@ -74,15 +73,40 @@ export function getNextPhaseTransition(plan: SignalPlan, timestampMs: number): n
 }
 
 /**
+ * Returns the epoch-ms timestamp of the next phase transition strictly
+ * after `timestampMs` (i.e. if you are exactly at a boundary, this returns
+ * the *following* boundary, not the current instant). `null` if the plan
+ * is unknown.
+ */
+export function getNextPhaseTransition(plan: SignalPlan | null, timestampMs: number): number | null {
+  if (plan == null) return null;
+  assertValidPlan(plan);
+  return nextPhaseTransitionForPlan(plan, timestampMs);
+}
+
+/**
  * Full prediction bundle for an intersection at an arrival timestamp:
- * current phase, time left in it, and the next green window.
+ * current phase, time left in it, and the next green window. Returns an
+ * "unknown" prediction (all timing fields null) when the intersection has
+ * no signalPlan — this must never be treated as green by a caller.
  */
 export function predictSignalState(intersection: Intersection, arrivalTimestampMs: number): SignalPrediction {
   const plan = intersection.signalPlan;
+  if (plan == null) {
+    return {
+      intersectionId: intersection.id,
+      phase: "unknown",
+      secondsRemainingInPhase: null,
+      nextTransitionAt: null,
+      nextGreenAt: null,
+      nextGreenEndsAt: null,
+      confidence: intersection.confidence,
+    };
+  }
   assertValidPlan(plan);
   const pos = cyclePosition(plan, arrivalTimestampMs);
   const phase = phaseAtCyclePosition(plan, pos);
-  const nextTransitionAt = getNextPhaseTransition(plan, arrivalTimestampMs);
+  const nextTransitionAt = nextPhaseTransitionForPlan(plan, arrivalTimestampMs);
 
   let nextGreenAt: number;
   let nextGreenEndsAt: number;
@@ -115,9 +139,10 @@ export function predictSignalState(intersection: Intersection, arrivalTimestampM
  * Enumerates every green window ([startAt, endAt)) that begins within
  * [startTime, startTime + horizonSeconds*1000]. If the signal is already
  * green at startTime, the first window's startAt is clamped to startTime
- * (the window is still "in progress").
+ * (the window is still "in progress"). Returns [] for an unknown (null) plan.
  */
-export function getGreenWindows(plan: SignalPlan, startTime: number, horizonSeconds: number): GreenWindow[] {
+export function getGreenWindows(plan: SignalPlan | null, startTime: number, horizonSeconds: number): GreenWindow[] {
+  if (plan == null) return [];
   assertValidPlan(plan);
   const horizonEnd = startTime + horizonSeconds * 1000;
   const windows: GreenWindow[] = [];

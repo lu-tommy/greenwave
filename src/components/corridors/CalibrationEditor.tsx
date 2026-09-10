@@ -3,12 +3,17 @@
 import { useState } from "react";
 import { demoCorridor } from "@/lib/data/corridors/demoCorridor";
 import { applyOverrides, isPlanConsistent, resetAllOverrides, saveOverride } from "@/lib/storage/calibrationStorage";
+import { RealWorldSignalKnowledge } from "./RealWorldSignalKnowledge";
 import type { Intersection, SignalPlan } from "@/lib/types";
 
 type FormState = SignalPlan & { confidence: number };
 
+/** A blank starting draft for a signal with no timing model yet — never asserted as real, just an editable seed. */
+const BLANK_DRAFT_PLAN: SignalPlan = { cycleSec: 60, greenSec: 28, yellowSec: 3, redSec: 29, offsetSec: 0 };
+
 function toForm(intersection: Intersection): FormState {
-  return { ...intersection.signalPlan, confidence: intersection.confidence };
+  const plan = intersection.signalPlan ?? BLANK_DRAFT_PLAN;
+  return { ...plan, confidence: intersection.confidence };
 }
 
 export function CalibrationEditor() {
@@ -38,10 +43,12 @@ export function CalibrationEditor() {
   }
 
   return (
-    <div className="flex flex-col gap-4 p-4 sm:p-6">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col gap-8 p-4 sm:p-6">
+      <RealWorldSignalKnowledge />
+
+      <div className="flex items-center justify-between border-t border-border-subtle pt-6">
         <div>
-          <h1 className="text-lg font-semibold text-foreground">Signal Calibration</h1>
+          <h1 className="text-lg font-semibold text-foreground">Demo Corridor Calibration</h1>
           <p className="text-xs text-foreground-dim">{corridor.name} · {corridor.dataSourceLabel}</p>
         </div>
         <button

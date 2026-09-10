@@ -157,3 +157,84 @@ describe("smoothRecommendation", () => {
     expect(smoothed.targetSpeedMps).toBe(next.targetSpeedMps);
   });
 });
+
+describe("optimize: unknown signal timing safety (route mode)", () => {
+  it("never reports 'green' for an intersection with no signal plan", () => {
+    const corridor = makeCorridor([makeIntersection({ signalPlan: null, confidence: 0 })]);
+    const vehicle: VehicleState = { timestamp: 0, positionM: 0, speedMps: mphToMps(20) };
+    const result = optimize(corridor, vehicle);
+    expect(result.recommendation.upcoming[0].predictedPhaseAtArrival).toBe("unknown");
+  });
+
+  it("does not classify PREPARE_TO_STOP for an unknown next signal even at low speed", () => {
+    // Very close unknown signal — if it were treated as an unreachable red,
+    // this would previously trigger PREPARE_TO_STOP. It must not.
+    const corridor = makeCorridor([
+      makeIntersection({ distanceAlongCorridorM: 30, signalPlan: null, confidence: 0 }),
+    ]);
+    const vehicle: VehicleState = { timestamp: 0, positionM: 0, speedMps: mphToMps(25) };
+    const result = optimize(corridor, vehicle);
+    expect(result.recommendation.instruction).not.toBe("PREPARE_TO_STOP");
+  });
+
+  it("does not claim a green wave when the very next signal is unknown, even if downstream signals are known green", () => {
+    const knownGreenPlan = { cycleSec: 60, greenSec: 55, yellowSec: 2, redSec: 3, offsetSec: 0 };
+    const corridor = makeCorridor([
+      makeIntersection({ id: "a", distanceAlongCorridorM: 300, signalPlan: null, confidence: 0 }),
+      makeIntersection({ id: "b", distanceAlongCorridorM: 700, signalPlan: knownGreenPlan, confidence: 0.9 }),
+    ]);
+    const vehicle: VehicleState = { timestamp: 0, positionM: 0, speedMps: mphToMps(20) };
+    const result = optimize(corridor, vehicle);
+    expect(result.recommendation.isGreenWave).toBe(false);
+    expect(result.recommendation.reason).toMatch(/LIMITED SIGNAL DATA|LEARNING ROUTE/);
+  });
+
+  it("labels a fully-unknown route as LEARNING ROUTE", () => {
+    const corridor = makeCorridor([
+      makeIntersection({ id: "a", distanceAlongCorridorM: 300, signalPlan: null, confidence: 0 }),
+      makeIntersection({ id: "b", distanceAlongCorridorM: 700, signalPlan: null, confidence: 0 }),
+    ]);
+    const vehicle: VehicleState = { timestamp: 0, positionM: 0, speedMps: mphToMps(20) };
+    const result = optimize(corridor, vehicle);
+    expect(result.recommendation.reason).toBe("LEARNING ROUTE");
+  });
+
+  it("never exceeds the speed limit even when every signal is unknown", () => {
+    const corridor = makeCorridor(
+      [makeIntersection({ distanceAlongCorridorM: 400, signalPlan: null, confidence: 0 })],
+      25,
+    );
+    const vehicle: VehicleState = { timestamp: 0, positionM: 0, speedMps: mphToMps(30) }; // already-illegal input speed
+    const result = optimize(corridor, vehicle);
+    expect(result.recommendation.targetSpeedMps).toBeLessThanOrEqual(mphToMps(25) + 1e-6);
+  });
+
+  it("still optimizes against a known downstream signal when the immediate next one is unknown", () => {
+    const redPlan = { cycleSec: 90, greenSec: 2, yellowSec: 1, redSec: 87, offsetSec: 0 }; // effectively always red
+    const corridor = makeCorridor([
+      makeIntersection({ id: "a", distanceAlongCorridorM: 200, signalPlan: null, confidence: 0 }),
+      makeIntersection({ id: "b", distanceAlongCorridorM: 900, signalPlan: redPlan, confidence: 0.9 }),
+    ]);
+    const vehicle: VehicleState = { timestamp: 0, positionM: 0, speedMps: mphToMps(25) };
+    const result = optimize(corridor, vehicle, DEFAULT_CONSTRAINTS, null, true);
+    // The known-red downstream signal should still influence the choice away from full speed.
+    const fullSpeedCandidate = result.candidates.find((c) => Math.abs(c.speedMps - mphToMps(25)) < 0.1);
+    expect(fullSpeedCandidate?.stopsRequired).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does not pin the recommendation at 0 mph on the very first GPS fix (speed 0, all signals unknown)", () => {
+    // Regression: the low-confidence conservative clamp used to be
+    // Math.min(best, vehicle.speedMps, limit) unconditionally, which locked
+    // the target at 0 forever whenever the first tick's derived speed was 0
+    // (no prior GPS fix to diff against) combined with low-confidence
+    // (here: zero-confidence unknown) signals.
+    const corridor = makeCorridor([
+      makeIntersection({ id: "a", distanceAlongCorridorM: 100, signalPlan: null, confidence: 0 }),
+      makeIntersection({ id: "b", distanceAlongCorridorM: 200, signalPlan: null, confidence: 0 }),
+    ]);
+    const vehicle: VehicleState = { timestamp: 0, positionM: 0, speedMps: 0 };
+    const result = optimize(corridor, vehicle);
+    expect(result.recommendation.targetSpeedMps).toBeGreaterThan(0);
+    expect(result.recommendation.targetSpeedMps).toBeLessThanOrEqual(corridor.speedLimitMps + 1e-6);
+  });
+});

@@ -1,11 +1,11 @@
 import { NavBar } from "@/components/ui/NavBar";
-import { DriveView } from "@/components/drive/DriveView";
+import { RouteDriveFlow } from "@/components/drive/RouteDriveFlow";
 
 export default function DrivePage() {
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-dvh flex-col">
       <NavBar />
-      <DriveView />
+      <RouteDriveFlow />
     </div>
   );
 }

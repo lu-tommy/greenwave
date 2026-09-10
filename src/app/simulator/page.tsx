@@ -3,7 +3,7 @@ import { SimulatorView } from "@/components/simulator/SimulatorView";
 
 export default function SimulatorPage() {
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-dvh flex-col">
       <NavBar />
       <SimulatorView />
     </div>

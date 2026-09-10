@@ -8,7 +8,7 @@ const LINKS = [
 
 export function NavBar() {
   return (
-    <header className="flex items-center justify-between border-b border-border-subtle px-5 py-3.5">
+    <header className="flex items-center justify-between border-b border-border-subtle px-5 py-3.5 pt-[max(env(safe-area-inset-top),0.875rem)]">
       <Link href="/" className="flex items-center gap-2">
         <span className="h-2 w-2 rounded-full bg-accent-green" />
         <span className="text-sm font-semibold tracking-wide text-foreground">GREEN WAVE</span>

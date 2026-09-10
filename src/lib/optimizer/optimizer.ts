@@ -148,14 +148,17 @@ function classifyInstruction(
   constraints: OptimizerConstraints,
   firstIntersectionDistanceM: number,
   nextGreenReachable: boolean,
+  nextIsUnknown: boolean,
 ): DriveInstruction {
   const delta = candidateSpeedMps - vehicle.speedMps;
 
   if (Math.abs(delta) <= HOLD_EPSILON_MPS) return "HOLD";
   if (delta > 0) return "ACCELERATE_GENTLY";
 
+  // Never "prepare to stop" for a signal we have no timing model for — that
+  // would fabricate certainty about a red we can't actually predict.
   const nearMinSpeed = candidateSpeedMps <= constraints.minUsefulSpeedMps + HOLD_EPSILON_MPS;
-  if (nearMinSpeed && !nextGreenReachable && firstIntersectionDistanceM < Infinity) {
+  if (nearMinSpeed && !nextIsUnknown && !nextGreenReachable && firstIntersectionDistanceM < Infinity) {
     return "PREPARE_TO_STOP";
   }
   return Math.abs(delta) <= GENTLE_REDUCTION_MPS ? "COAST" : "SLOW";
@@ -177,6 +180,13 @@ function buildReason(
     }
     return "RED AHEAD";
   }
+
+  const nextIsUnknown = upcoming[0]?.predictedPhaseAtArrival === "unknown";
+  if (nextIsUnknown) {
+    const anyKnownDownstream = upcoming.some((f) => f.predictedPhaseAtArrival !== "unknown");
+    return anyKnownDownstream ? "LIMITED SIGNAL DATA" : "LEARNING ROUTE";
+  }
+
   if (instruction === "COAST" || instruction === "SLOW") {
     return upcoming[0]?.predictedPhaseAtArrival === "green" ? "TIMING TO NEXT GREEN" : "EASING FOR RED AHEAD";
   }
@@ -230,23 +240,36 @@ export function optimize(
 
   const firstDistance = upcoming.length > 0 ? upcoming[0].distanceAlongCorridorM - vehicle.positionM : Infinity;
   const nextGreenReachable = best.forecasts[0]?.predictedPhaseAtArrival === "green";
+  const nextIsUnknown = best.forecasts[0]?.predictedPhaseAtArrival === "unknown";
 
-  const instruction = classifyInstruction(best.speedMps, vehicle, constraints, firstDistance, nextGreenReachable);
+  const instruction = classifyInstruction(
+    best.speedMps,
+    vehicle,
+    constraints,
+    firstDistance,
+    nextGreenReachable,
+    nextIsUnknown,
+  );
   const greenWaveCount = best.forecasts.reduce((count, f, idx) => {
     if (idx === count && f.predictedPhaseAtArrival === "green") return count + 1;
     return count;
   }, 0);
   const isGreenWave = greenWaveCount >= 2;
 
-  const secondsToNextGreenFromNow =
-    upcoming.length > 0 ? (predictSignalState(upcoming[0], vehicle.timestamp).nextGreenAt - vehicle.timestamp) / 1000 : null;
+  const nextGreenAtFromNow = upcoming.length > 0 ? predictSignalState(upcoming[0], vehicle.timestamp).nextGreenAt : null;
+  const secondsToNextGreenFromNow = nextGreenAtFromNow != null ? (nextGreenAtFromNow - vehicle.timestamp) / 1000 : null;
 
   const confidence = upcoming.length > 0 ? Math.min(...upcoming.map((i) => i.confidence)) : 1;
 
   // Low-confidence downstream data -> fall back toward current legal cruising
   // rather than asserting a precise recommendation the engine can't back up.
+  // Only clamps toward "current speed" when current speed is itself a real,
+  // established cruising speed — at the very start of a drive (or the first
+  // GPS fix, before a speed can be derived) vehicle.speedMps is 0, and
+  // clamping to that would incorrectly pin the recommendation at 0 forever.
+  const hasEstablishedSpeed = vehicle.speedMps > constraints.minUsefulSpeedMps;
   const conservativeSpeed =
-    confidence < 0.4 ? Math.min(best.speedMps, vehicle.speedMps, speedLimit) : best.speedMps;
+    confidence < 0.4 && hasEstablishedSpeed ? Math.min(best.speedMps, vehicle.speedMps, speedLimit) : best.speedMps;
 
   const rec: DriveRecommendation = {
     timestamp: vehicle.timestamp,

@@ -10,6 +10,14 @@ import type { Corridor, SignalPlan } from "@/lib/types";
 export type SignalOverride = SignalPlan & { confidence: number };
 type OverrideMap = Record<string, SignalOverride>; // intersectionId -> override
 
+/**
+ * Shared calibration namespace for real-world (route-discovered) signals.
+ * Deliberately NOT the route hash — a physical signal encountered on two
+ * different routes should reuse the same manual override, since it's the
+ * same intersection either way.
+ */
+export const REAL_WORLD_CALIBRATION_NAMESPACE = "real-world-signals";
+
 function storageKey(corridorId: string): string {
   return `greenwave:calibration:${corridorId}`;
 }
@@ -27,6 +35,10 @@ export function loadOverrides(corridorId: string): OverrideMap {
   } catch {
     return {};
   }
+}
+
+export function getManualOverride(corridorId: string, intersectionId: string): SignalOverride | undefined {
+  return loadOverrides(corridorId)[intersectionId];
 }
 
 export function saveOverride(corridorId: string, intersectionId: string, override: SignalOverride): void {

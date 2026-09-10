@@ -12,6 +12,7 @@ const PHASE_HEX: Record<SignalPhaseName, string> = {
   green: "#3ddc84",
   yellow: "#f5b942",
   red: "#ef5c5c",
+  unknown: "#5a5f66",
 };
 
 // Plain raster OpenStreetMap tiles — free, key-free, and far more legible
@@ -136,12 +137,16 @@ export function CorridorMap({ corridor, vehiclePositionM, timestamp, compact = f
 
       if (!compact) {
         const prediction = predictSignalState(intersection, timestamp);
+        const plan = intersection.signalPlan;
+        const timingLine =
+          plan != null
+            ? `next transition: ${formatDuration(prediction.secondsRemainingInPhase ?? 0)}<br/>cycle: ${plan.cycleSec}s · offset: ${plan.offsetSec.toFixed(1)}s<br/>`
+            : `timing: unknown (no calibrated or learned model yet)<br/>`;
         const popupHtml = `
           <div style="font: 12px system-ui; color: #111; line-height: 1.5;">
             <strong>${intersection.name}</strong><br/>
             phase: ${prediction.phase}<br/>
-            next transition: ${formatDuration(prediction.secondsRemainingInPhase)}<br/>
-            cycle: ${intersection.signalPlan.cycleSec}s · offset: ${intersection.signalPlan.offsetSec.toFixed(1)}s<br/>
+            ${timingLine}
             confidence: ${Math.round(intersection.confidence * 100)}%
           </div>`;
         marker.setPopup(new Popup({ offset: 16 }).setHTML(popupHtml));
